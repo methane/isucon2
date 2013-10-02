@@ -134,8 +134,9 @@ SELECT stock.seat_id, variation.name AS v_name, ticket.name AS t_name, artist.na
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Fatal(err)
+		log.Print(err)
 	}
+	rows.Close()
 
 	return solds
 }
@@ -143,7 +144,7 @@ SELECT stock.seat_id, variation.name AS v_name, ticket.name AS t_name, artist.na
 func topPageHandler(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT * FROM artist")
 	if err != nil {
-		log.Fatal(err)
+		log.Print(err)
 	}
 
 	artists := []Data{}
@@ -151,12 +152,12 @@ func topPageHandler(w http.ResponseWriter, r *http.Request) {
 		var id int
 		var name string
 		if err := rows.Scan(&id, &name); err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 		artists = append(artists, Data{"Id": id, "Name": name})
 	}
 	if err := rows.Err(); err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 	data := Data{
 		"Artists":    artists,
@@ -168,7 +169,7 @@ func topPageHandler(w http.ResponseWriter, r *http.Request) {
 func artistHandler(w http.ResponseWriter, r *http.Request) {
 	artistId, err := getId(r.RequestURI)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	var (
@@ -180,7 +181,7 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 	var rows *sql.Rows
 	rows, err = db.Query("SELECT id, name FROM ticket WHERE artist_id = ?", artistId)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	tickets := []Data{}
@@ -188,7 +189,7 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 		var id int
 		var name string
 		if err := rows.Scan(&id, &name); err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 		var count int
 		err = db.QueryRow(`
@@ -199,7 +200,7 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 		tickets = append(tickets, Data{"Id": id, "Name": name, "Count": count})
 	}
 	if err := rows.Err(); err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	data := Data{
@@ -215,7 +216,7 @@ var rowcol = make([]int, 64)
 func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	ticketId, err := getId(r.RequestURI)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	var (
@@ -224,7 +225,7 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	)
 	err = db.QueryRow("SELECT t.*, a.name AS artist_name FROM ticket t INNER JOIN artist a ON t.artist_id = a.id WHERE t.id = ? LIMIT 1", ticketId).Scan(&tid, &tname, &aid, &aname)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	ticket := Data{"Id": tid, "Name": tname, "ArtistId": aid, "ArtistName": aname}
@@ -232,7 +233,7 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	var rows *sql.Rows
 	rows, err = db.Query("SELECT id, name FROM variation WHERE ticket_id = ?", tid)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	variations := []Data{}
@@ -240,13 +241,13 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 		var id int
 		var name string
 		if err := rows.Scan(&id, &name); err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 
 		var rows2 *sql.Rows
 		rows2, err = db.Query("SELECT seat_id, order_id FROM stock WHERE variation_id = ?", id)
 		if err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 		stock := make(Data)
 		for rows2.Next() {
@@ -256,13 +257,13 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 			)
 			err = rows2.Scan(&seatId, &orderId)
 			if err != nil {
-				log.Fatal(err)
+				log.Panic(err)
 			}
 
 			stock[seatId] = orderId
 		}
 		if err := rows2.Err(); err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 
 		var vacancy int
@@ -270,13 +271,13 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
         SELECT COUNT(*) AS cunt FROM stock WHERE variation_id = ? AND
          order_id IS NULL`, id).Scan(&vacancy)
 		if err != nil {
-			log.Fatal(err)
+			log.Panic(err)
 		}
 
 		variations = append(variations, Data{"Id": id, "Name": name, "Stock": stock, "Vacancy": vacancy})
 	}
 	if err := rows.Err(); err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	data := Data{
@@ -296,14 +297,14 @@ func buyHandler(w http.ResponseWriter, r *http.Request) {
 
 	variationId, err := strconv.ParseInt(r.FormValue("variation_id"), 10, 64)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 	memberId := r.FormValue("member_id")
 
 	var tx *sql.Tx
 	tx, err = db.Begin()
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 	defer func() {
 		if err := recover(); err != nil {
@@ -351,7 +352,7 @@ func buyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := tx.Commit(); err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	data := Data{
@@ -377,7 +378,7 @@ func adminCsvHandler(w http.ResponseWriter, r *http.Request) {
         FROM order_request JOIN stock ON order_request.id = stock.order_id
         ORDER BY order_request.id ASC`)
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	orders := []Data{}
