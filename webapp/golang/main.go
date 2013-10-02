@@ -9,7 +9,7 @@ import (
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"html/template"
-	"io"
+        "io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -89,6 +89,7 @@ type SeatStock struct {
 
 type Variation struct {
 	artist, ticket, variation string
+        artist_id, ticket_id, variation_id int
 }
 
 var (
@@ -103,11 +104,11 @@ var (
 	//master
 	variations map[int]Variation = make(map[int]Variation)
 	artists    []Data
-	//tickets []Data
+	tickets []Data
 )
 
 func initMaster() {
-	rows, err := db.Query(`select variation.id, artist.name, ticket.name, variation.name
+	rows, err := db.Query(`select artist.id, ticket.id, variation.id, artist.name, ticket.name, variation.name
             from artist, ticket, variation WHERE artist.id = ticket.artist_id AND ticket.id = variation.ticket_id`)
 
 	if err != nil {
@@ -115,11 +116,12 @@ func initMaster() {
 	}
 
 	for rows.Next() {
-		var id int
+		var aid, tid, vid int
 		var artist, ticket, variation string
 
-		rows.Scan(&id, &artist, &ticket, &variation)
-		variations[id] = Variation{artist: artist, ticket: ticket, variation: variation}
+		rows.Scan(&aid, &tid, &vid, &artist, &ticket, &variation)
+		variations[vid] = Variation{artist: artist, ticket: ticket, variation: variation,
+                    artist_id: aid, ticket_id:tid, variation_id: vid}
 	}
 	rows.Close()
 
@@ -137,7 +139,27 @@ func initMaster() {
 		}
 		artists = append(artists, Data{"Id": id, "Name": name})
 	}
+        rows.Close()
 
+	rows, err = db.Query("SELECT id, name, artist_id FROM ticket")
+	if err != nil {
+		log.Panic(err)
+	}
+
+	tickets = []Data{}
+	for rows.Next() {
+		var id, aid int
+		var name string
+		if err := rows.Scan(&id, &name, &aid); err != nil {
+			log.Panic(err)
+		}
+                tickets = append(tickets, Data{
+                    "id": id,
+                    "name": name,
+                    "artist_id": aid,
+                })
+	}
+        rows.Close()
 }
 
 func initSellService() {
@@ -306,36 +328,34 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 		aid   int
 		aname string
 	)
-	err = db.QueryRow("SELECT id, name FROM artist WHERE id = ? LIMIT 1", artistId).Scan(&aid, &aname)
+	//err = db.QueryRow("SELECT id, name FROM artist WHERE id = ? LIMIT 1", artistId).Scan(&aid, &aname)
+        aid = artistId
+        if aid == 1 {
+            aname = "NHN48"
+        } else {
+            aname = "はだいろクローバーZ"
+        }
 
-	var rows *sql.Rows
-	rows, err = db.Query("SELECT id, name FROM ticket WHERE artist_id = ?", artistId)
-	if err != nil {
-		log.Panic(err)
-	}
+	tt := []Data{}
+        for _, t := range tickets {
+            if t["artist_id"] != aid {
+                continue
+            }
+            tid, _ := t["id"].(int)
+            tname, _ := t["name"].(string)
+            ss := 0
 
-	tickets := []Data{}
-	for rows.Next() {
-		var id int
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			log.Panic(err)
-		}
-		var count int
-		err = db.QueryRow(`
-            SELECT COUNT(*) AS cnt FROM variation                     
-            INNER JOIN stock ON stock.variation_id = variation.id    
-            WHERE variation.ticket_id = ? AND stock.order_id IS NULL`,
-			id).Scan(&count)
-		tickets = append(tickets, Data{"Id": id, "Name": name, "Count": count})
-	}
-	if err := rows.Err(); err != nil {
-		log.Panic(err)
-	}
+            for vid, v := range variations {
+                if v.ticket_id == tid {
+                    ss += len(stock[vid])
+                }
+            }
+            tt = append(tt, Data{"Id": tid, "Name": tname, "Count": ss})
+        }
 
 	data := Data{
 		"Artist":     Data{"Id": aid, "Name": aname},
-		"Tickets":    tickets,
+		"Tickets":    tt,
 		"RecentSold": getRecentSold(),
 	}
 	artistTmpl.ExecuteTemplate(w, "layout", data)
@@ -343,13 +363,99 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 
 var rowcol = make([]int, 64)
 
-type PageCache struct {
-	created time.Time
-	data    string
+
+var ticketPageCache map[int]string = make(map[int]string)
+
+func ticketPageMaker() {
+    for {
+        for i := 1; i<6; i++ {
+            sellMutex.Lock()
+            log.Println("Creating ticket page cache for", i)
+            ticketId := i
+
+            var (
+                    tid, aid     int
+                    tname, aname string
+            )
+            err := db.QueryRow("SELECT t.*, a.name AS artist_name FROM ticket t INNER JOIN artist a ON t.artist_id = a.id WHERE t.id = ? LIMIT 1", ticketId).Scan(&tid, &tname, &aid, &aname)
+            if err != nil {
+                    sellMutex.Unlock()
+                    time.Sleep(time.Second)
+                    continue;
+            }
+
+            ticket := Data{"Id": tid, "Name": tname, "ArtistId": aid, "ArtistName": aname}
+
+            var rows *sql.Rows
+            rows, err = db.Query("SELECT id, name FROM variation WHERE ticket_id = ?", tid)
+            if err != nil {
+                    sellMutex.Unlock()
+                    time.Sleep(time.Second)
+                    continue;
+            }
+
+            variations := []Data{}
+            for rows.Next() {
+                    var id int
+                    var name string
+                    if err := rows.Scan(&id, &name); err != nil {
+                        sellMutex.Unlock()
+                        time.Sleep(time.Second)
+                        continue;
+                    }
+
+                    var rows2 *sql.Rows
+                    rows2, err = db.Query("SELECT seat_id, order_id FROM stock WHERE variation_id = ?", id)
+                    if err != nil {
+                            sellMutex.Unlock()
+                            time.Sleep(time.Second)
+                            continue;
+                    }
+                    stock := make(Data)
+                    for rows2.Next() {
+                            var (
+                                    seatId  string
+                                    orderId interface{}
+                            )
+                            err = rows2.Scan(&seatId, &orderId)
+                            if err != nil {
+                                    log.Panic(err)
+                            }
+
+                            stock[seatId] = orderId
+                    }
+                    if err := rows2.Err(); err != nil {
+                            log.Panic(err)
+                    }
+
+                    var vacancy int
+                    err = db.QueryRow(`SELECT COUNT(*) AS cunt FROM stock WHERE variation_id = ? AND order_id IS NULL`, id).Scan(&vacancy)
+                    if err != nil {
+                            log.Panic(err)
+                    }
+                    variations = append(variations, Data{"Id": id, "Name": name, "Stock": stock, "Vacancy": vacancy})
+            }
+            if err := rows.Err(); err != nil {
+                    log.Panic(err)
+            }
+
+            data := Data{
+                    "Ticket":     ticket,
+                    "Variations": variations,
+                    "RecentSold": getRecentSold(),
+                    "RowCol":     rowcol,
+            }
+
+            buf := bytes.Buffer{}
+            ticketTmpl.ExecuteTemplate(&buf, "layout", data)
+            ticketPageCache[ticketId] = buf.String()
+
+            sellMutex.Unlock()
+        }
+        time.Sleep(time.Second / 10)
+    }
 }
 
-var ticketPageCache map[int]PageCache = make(map[int]PageCache)
-var ticketPageM sync.Mutex = sync.Mutex{}
 
 func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	ticketId, err := getId(r.RequestURI)
@@ -357,16 +463,10 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 		log.Panic(err)
 	}
 
-	ticketPageM.Lock()
-	defer ticketPageM.Unlock()
 	cache, ok := ticketPageCache[ticketId]
-	if ok && time.Now().Sub(cache.created) < time.Second {
-		io.WriteString(w, cache.data)
-		return
-	}
-	log.Println("Creating cache for", ticketId)
 	if ok {
-		log.Println(time.Now(), cache.created)
+		io.WriteString(w, cache)
+		return
 	}
 
 	var (
@@ -437,13 +537,7 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 		"RowCol":     rowcol,
 	}
 
-	buf := bytes.Buffer{}
-	ticketTmpl.ExecuteTemplate(&buf, "layout", data)
-	buf.WriteTo(w)
-
-	ticketPageCache[ticketId] = PageCache{
-		created: time.Now(),
-		data:    buf.String()}
+	ticketTmpl.ExecuteTemplate(w, "layout", data)
 }
 
 func buyHandler(w http.ResponseWriter, r *http.Request) {
@@ -552,6 +646,7 @@ func main() {
 
 	initMaster()
 	initSellService()
+        //go ticketPageMaker()
 
 	http.HandleFunc("/", topPageHandler)
 	http.HandleFunc("/artist/", artistHandler)
