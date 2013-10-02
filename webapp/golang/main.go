@@ -433,6 +433,7 @@ func main() {
 	if err != nil {
 		log.Panic(err.Error())
 	}
+	db.SetMaxIdleConns(256)
 
 	for i, _ := range rowcol {
 		rowcol[i] = i + 1
