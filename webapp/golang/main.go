@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"html/template"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -100,6 +102,8 @@ var (
 
 	//master
 	variations map[int]Variation = make(map[int]Variation)
+	artists    []Data
+	//tickets []Data
 )
 
 func initMaster() {
@@ -118,6 +122,22 @@ func initMaster() {
 		variations[id] = Variation{artist: artist, ticket: ticket, variation: variation}
 	}
 	rows.Close()
+
+	rows, err = db.Query("SELECT * FROM artist")
+	if err != nil {
+		log.Print(err)
+	}
+
+	artists = []Data{}
+	for rows.Next() {
+		var id int
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			log.Panic(err)
+		}
+		artists = append(artists, Data{"Id": id, "Name": name})
+	}
+
 }
 
 func initSellService() {
@@ -176,7 +196,7 @@ func sell(memberId string, variationId int) (orderId int, seatId string) {
 	ss := stock[variationId]
 	seat, stock[variationId] = ss[len(ss)-1], ss[:len(ss)-1]
 
-	// シーケンシャルにやる
+	// 別 goroutineシーケンシャルにやる
 	go func() {
 		db.Exec(`INSERT INTO order_request (id, member_id) VALUES (?, ?)`, orderId, memberId)
 		db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, seat.id)
@@ -262,23 +282,6 @@ func getRecentSold() []Data {
 }
 
 func topPageHandler(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT * FROM artist")
-	if err != nil {
-		log.Print(err)
-	}
-
-	artists := []Data{}
-	for rows.Next() {
-		var id int
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			log.Panic(err)
-		}
-		artists = append(artists, Data{"Id": id, "Name": name})
-	}
-	if err := rows.Err(); err != nil {
-		log.Panic(err)
-	}
 	data := Data{
 		"Artists":    artists,
 		"RecentSold": getRecentSold(),
@@ -290,6 +293,13 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 	artistId, err := getId(r.RequestURI)
 	if err != nil {
 		log.Panic(err)
+	}
+
+	var artist Data
+	for _, artist = range artists {
+		if artist["ArtistId"] == artistId {
+			break
+		}
 	}
 
 	var (
@@ -333,10 +343,30 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 
 var rowcol = make([]int, 64)
 
+type PageCache struct {
+	created time.Time
+	data    string
+}
+
+var ticketPageCache map[int]PageCache = make(map[int]PageCache)
+var ticketPageM sync.Mutex = sync.Mutex{}
+
 func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	ticketId, err := getId(r.RequestURI)
 	if err != nil {
 		log.Panic(err)
+	}
+
+	ticketPageM.Lock()
+	defer ticketPageM.Unlock()
+	cache, ok := ticketPageCache[ticketId]
+	if ok && time.Now().Sub(cache.created) < time.Second {
+		io.WriteString(w, cache.data)
+		return
+	}
+	log.Println("Creating cache for", ticketId)
+	if ok {
+		log.Println(time.Now(), cache.created)
 	}
 
 	var (
@@ -406,8 +436,14 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 		"RecentSold": getRecentSold(),
 		"RowCol":     rowcol,
 	}
-	ticketTmpl.ExecuteTemplate(w, "layout", data)
 
+	buf := bytes.Buffer{}
+	ticketTmpl.ExecuteTemplate(&buf, "layout", data)
+	buf.WriteTo(w)
+
+	ticketPageCache[ticketId] = PageCache{
+		created: time.Now(),
+		data:    buf.String()}
 }
 
 func buyHandler(w http.ResponseWriter, r *http.Request) {
