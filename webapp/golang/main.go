@@ -30,8 +30,7 @@ type DbConfig struct {
 
 func (db *DbConfig) String() string {
 	return fmt.Sprintf(
-		//		"%s:%s@tcp(%s:%d)/%s?tls=skip-verify&charset=utf8mb4,utf8",
-		"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4,utf8",
+		"%s:%s@tcp(%s:%d)/%s",
 		db.UserName,
 		db.Password,
 		db.Host,
@@ -347,8 +346,13 @@ func buyHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Panic(err.Error())
 	}
+	if err := rows.Close(); err != nil {
+		log.Panic(err.Error())
+	}
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		log.Fatal(err)
+	}
 
 	data := Data{
 		"MemberId": memberId,
