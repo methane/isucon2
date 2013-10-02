@@ -9,10 +9,12 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"html/template"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -78,10 +80,122 @@ func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
+type SeatStock struct {
+	id   int
+	seat string
+}
+
+type Variation struct {
+	artist, ticket, variation string
+}
+
 var (
 	config = loadConfig()
 	db     *sql.DB
+
+	sellMutex   = &sync.RWMutex{}
+	recentSold  []Data
+	nextOrderId int
+	stock       map[int][]SeatStock // artist_id -> seat
+
+	//master
+	variations map[int]Variation = make(map[int]Variation)
 )
+
+func initMaster() {
+	rows, err := db.Query(`select variation.id, artist.name, ticket.name, variation.name
+            from artist, ticket, variation WHERE artist.id = ticket.artist_id AND ticket.id = variation.ticket_id`)
+
+	if err != nil {
+		log.Panic(err)
+	}
+
+	for rows.Next() {
+		var id int
+		var artist, ticket, variation string
+
+		rows.Scan(&id, &artist, &ticket, &variation)
+		variations[id] = Variation{artist: artist, ticket: ticket, variation: variation}
+	}
+	rows.Close()
+}
+
+func initSellService() {
+	sellMutex.Lock()
+	defer sellMutex.Unlock()
+
+	initRecentSold()
+
+	rows, err := db.Query(`SELECT MAX(id) FROM order_request`)
+	if err != nil {
+		log.Panic(err)
+	}
+	rows.Next()
+	var max_id int
+	rows.Scan(&max_id)
+	rows.Close()
+	nextOrderId = max_id + 1
+
+	log.Println("nextOrderId", nextOrderId)
+
+	if rows, err = db.Query(`SELECT id, variation_id, seat_id FROM stock WHERE order_id IS NULL`); err != nil {
+		log.Panic(err)
+	}
+
+	// stock をメモリ上に確保しておく.
+	stock = make(map[int][]SeatStock)
+	for rows.Next() {
+		var id, variationId int
+		var seatId string
+		rows.Scan(&id, &variationId, &seatId)
+		stock[variationId] = append(stock[variationId], SeatStock{id: id, seat: seatId})
+	}
+	rows.Close()
+
+	for _, seats := range stock {
+		L := len(seats)
+		for i := 0; i < L; i++ {
+			r := rand.Int31n(int32(L))
+			seats[i], seats[r] = seats[r], seats[i]
+		}
+	}
+}
+
+func sell(memberId string, variationId int) (orderId int, seatId string) {
+	sellMutex.Lock()
+	defer sellMutex.Unlock()
+
+	if len(stock[variationId]) == 0 {
+		return 0, ""
+	}
+
+	orderId = nextOrderId
+	nextOrderId++
+
+	var seat SeatStock
+	ss := stock[variationId]
+	seat, stock[variationId] = ss[len(ss)-1], ss[:len(ss)-1]
+
+	// シーケンシャルにやる
+	go func() {
+		db.Exec(`INSERT INTO order_request (id, member_id) VALUES (?, ?)`, orderId, memberId)
+		db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, seat.id)
+	}()
+
+	seatId = seat.seat
+	vari := variations[variationId]
+
+	if len(recentSold) < 10 {
+		recentSold = append(recentSold, nil)
+	}
+	copy(recentSold[1:], recentSold)
+	recentSold[0] = Data{
+		"ArtistName":    vari.artist,
+		"TicketName":    vari.ticket,
+		"VariationName": vari.variation,
+		"SeatId":        seatId}
+	return
+}
 
 var (
 	indexTmpl    = parseTemplate("index")
@@ -105,7 +219,7 @@ func parseTemplate(name string) *template.Template {
 
 type Data map[string]interface{}
 
-func getRecentSold() []Data {
+func initRecentSold() []Data {
 	rows, err := db.Query(`
 SELECT stock.seat_id, variation.name AS v_name, ticket.name AS t_name, artist.name AS a_name FROM stock
         JOIN variation ON stock.variation_id = variation.id
@@ -137,8 +251,14 @@ SELECT stock.seat_id, variation.name AS v_name, ticket.name AS t_name, artist.na
 		log.Print(err)
 	}
 	rows.Close()
-
+	recentSold = solds
 	return solds
+}
+
+func getRecentSold() []Data {
+	sellMutex.RLock()
+	defer sellMutex.RUnlock()
+	return recentSold
 }
 
 func topPageHandler(w http.ResponseWriter, r *http.Request) {
@@ -301,58 +421,10 @@ func buyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	memberId := r.FormValue("member_id")
 
-	var tx *sql.Tx
-	tx, err = db.Begin()
-	if err != nil {
-		log.Panic(err)
-	}
-	defer func() {
-		if err := recover(); err != nil {
-			tx.Rollback()
-			panic(err)
-		}
-	}()
-
-	var result sql.Result
-	result, err = tx.Exec("INSERT INTO order_request (member_id) VALUES (?)", memberId)
-	if err != nil {
-		log.Panic(err.Error())
-	}
-
-	orderId, err := result.LastInsertId()
-	if err != nil {
-		log.Panic(err.Error())
-	}
-
-	result, err = tx.Exec("UPDATE stock SET order_id = ? WHERE variation_id = ? AND order_id IS NULL ORDER BY RAND() LIMIT 1", orderId, variationId)
-
-	var rows *sql.Rows
-	rows, err = tx.Query("SELECT seat_id FROM stock WHERE order_id = ? LIMIT 1", orderId)
-	if err != nil {
-		log.Panic(err.Error())
-	}
-
-	if !rows.Next() {
-		tx.Rollback()
-		soldoutTmpl.ExecuteTemplate(w, "layout", nil)
+	orderId, seatId := sell(memberId, int(variationId))
+	if orderId == 0 {
+		completeTmpl.ExecuteTemplate(w, "layout", nil)
 		return
-	}
-
-	if err := rows.Err(); err != nil {
-		log.Panic(err.Error())
-	}
-
-	var seatId string
-	err = rows.Scan(&seatId)
-	if err != nil {
-		log.Panic(err.Error())
-	}
-	if err := rows.Close(); err != nil {
-		log.Panic(err.Error())
-	}
-
-	if err := tx.Commit(); err != nil {
-		log.Panic(err)
 	}
 
 	data := Data{
@@ -365,6 +437,8 @@ func buyHandler(w http.ResponseWriter, r *http.Request) {
 func adminHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		initDb()
+		initMaster()
+		initSellService()
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
@@ -439,6 +513,9 @@ func main() {
 	for i, _ := range rowcol {
 		rowcol[i] = i + 1
 	}
+
+	initMaster()
+	initSellService()
 
 	http.HandleFunc("/", topPageHandler)
 	http.HandleFunc("/artist/", artistHandler)
