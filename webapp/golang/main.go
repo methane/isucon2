@@ -32,6 +32,10 @@ type DbConfig struct {
 	DbName   string `json:"dbname"`
 }
 
+type TicketPage struct {
+
+}
+
 func (db *DbConfig) String() string {
 	return fmt.Sprintf(
 		"%s:%s@tcp(%s:%d)/%s",
@@ -219,10 +223,8 @@ func sell(memberId string, variationId int) (orderId int, seatId string) {
 	seat, stock[variationId] = ss[len(ss)-1], ss[:len(ss)-1]
 
 	// 別 goroutineシーケンシャルにやる
-	go func() {
-		db.Exec(`INSERT INTO order_request (id, member_id) VALUES (?, ?)`, orderId, memberId)
-		db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, seat.id)
-	}()
+        db.Exec(`INSERT INTO order_request (id, member_id) VALUES (?, ?)`, orderId, memberId)
+        db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, seat.id)
 
 	seatId = seat.seat
 	vari := variations[variationId]
@@ -455,18 +457,8 @@ func ticketPageMaker() {
 	}
 }
 
-func ticketHandler(w http.ResponseWriter, r *http.Request) {
-	ticketId, err := getId(r.RequestURI)
-	if err != nil {
-		log.Panic(err)
-	}
 
-	cache, ok := ticketPageCache[ticketId]
-	if ok {
-		io.WriteString(w, cache)
-		return
-	}
-
+func ticketPage(ticketId int) string {
 	var ticket Data
 	for _, v := range variations {
 		if v.ticket_id == ticketId {
@@ -476,7 +468,8 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vv := []Data{}
-	for _, v := range variations {
+	for i := 1; i <= 11; i++ {
+		v := variations[i]
 		if v.ticket_id != ticketId {
 			continue
 		}
@@ -489,7 +482,6 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 				ss[seat] = true
 			}
 		}
-
 		for _, seat := range stock[v.variation_id] {
 			delete(ss, seat.seat)
 		}
@@ -523,10 +515,18 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 		"RowCol":     rowcol,
 	}
 
-	//ticketTmpl.ExecuteTemplate(w, "layout", data)
 	buf := bytes.Buffer{}
 	ticketTmpl.ExecuteTemplate(&buf, "layout", data)
-	buf.WriteTo(w)
+	return buf.String()
+}
+
+func ticketHandler(w http.ResponseWriter, r *http.Request) {
+	ticketId, err := getId(r.RequestURI)
+	if err != nil {
+		log.Panic(err)
+	}
+	page := ticketPage(ticketId)
+	io.WriteString(w, page)
 }
 
 func buyHandler(w http.ResponseWriter, r *http.Request) {
