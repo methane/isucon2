@@ -11,15 +11,20 @@ import (
 	"html/template"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+func must(err error) {
+	if err != nil {
+		log.Panic(err)
+	}
+}
 
 type Config struct {
 	Db *DbConfig `json:"database"`
@@ -42,27 +47,6 @@ func (db *DbConfig) String() string {
 		db.Port,
 		db.DbName,
 	)
-}
-
-type TicketPageCache struct {
-	cache map[int]string
-}
-
-func (self *TicketPageCache) Worker() {
-	for {
-		for p := 1; p < 11; p++ {
-			self.cache[p] = ticketPage(p)
-		}
-		time.Sleep(time.Second / 2)
-	}
-}
-
-func (self *TicketPageCache) Get(t int) string {
-	cache, ok := self.cache[t]
-	if ok {
-		return cache
-	}
-	return ticketPage(t)
 }
 
 func loadConfig() *Config {
@@ -100,87 +84,131 @@ func initDb() {
 	}
 }
 
-func init() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-}
-
-type SeatStock struct {
-	id   int
-	seat string
-}
-
-type Variation struct {
-	artist, ticket, variation          string
-	artist_id, ticket_id, variation_id int
-}
-
 var (
 	db *sql.DB
 
-	sellMutex   = &sync.RWMutex{}
-	recentSold  []Data
-	nextOrderId int
-	stock       map[int][]SeatStock // variation_id -> seat
-
-	//master
-	variations map[int]Variation = make(map[int]Variation)
-	artists    []Data
-	tickets    []Data
+	sellMutex  = &sync.RWMutex{}
+	recentSold []Data
 )
 
-func initMaster() {
-	rows, err := db.Query(`select artist.id, ticket.id, variation.id, artist.name, ticket.name, variation.name
-            from artist, ticket, variation WHERE artist.id = ticket.artist_id AND ticket.id = variation.ticket_id`)
+type Stock struct {
+	Id   int
+	Seat string
+}
 
-	if err != nil {
-		log.Panic(err)
-	}
+type Variation struct {
+	Id       int
+	Name     string
+	TicketId int
+	stock    []Stock
+}
 
-	for rows.Next() {
-		var aid, tid, vid int
-		var artist, ticket, variation string
+type Ticket struct {
+	Id         int
+	Name       string
+	ArtistId   int
+	variations []*Variation
+}
 
-		rows.Scan(&aid, &tid, &vid, &artist, &ticket, &variation)
-		variations[vid] = Variation{artist: artist, ticket: ticket, variation: variation,
-			artist_id: aid, ticket_id: tid, variation_id: vid}
-	}
-	rows.Close()
+type Artist struct {
+	Id      int
+	Name    string
+	tickets []*Ticket
+}
 
-	rows, err = db.Query("SELECT * FROM artist")
-	if err != nil {
-		log.Print(err)
-	}
+type Master struct {
+	lock sync.RWMutex
 
-	artists = []Data{}
+	artists    map[int]*Artist
+	tickets    map[int]*Ticket
+	variations map[int]*Variation
+
+	nextOrderId int
+}
+
+var M = Master{
+	lock:        sync.RWMutex{},
+	artists:     make(map[int]*Artist),
+	tickets:     make(map[int]*Ticket),
+	variations:  make(map[int]*Variation),
+	nextOrderId: 0}
+
+func loadArtists() {
+	rows, err := db.Query(`select id, name from artist order by id`)
+	must(err)
+	defer rows.Close()
 	for rows.Next() {
 		var id int
 		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			log.Panic(err)
-		}
-		artists = append(artists, Data{"Id": id, "Name": name})
+		rows.Scan(&id, &name)
+		M.artists[id] = &Artist{id, name, []*Ticket{}}
 	}
-	rows.Close()
+}
 
-	rows, err = db.Query("SELECT id, name, artist_id FROM ticket")
-	if err != nil {
-		log.Panic(err)
-	}
-
-	tickets = []Data{}
+func loadTickets() {
+	rows, err := db.Query(`select id, name, artist_id from ticket order by id`)
+	must(err)
+	defer rows.Close()
 	for rows.Next() {
 		var id, aid int
 		var name string
-		if err := rows.Scan(&id, &name, &aid); err != nil {
-			log.Panic(err)
-		}
-		tickets = append(tickets, Data{
-			"id":        id,
-			"name":      name,
-			"artist_id": aid,
-		})
+		rows.Scan(&id, &name, &aid)
+		ticket := &Ticket{id, name, aid, []*Variation{}}
+		M.tickets[id] = ticket
+		M.artists[aid].tickets = append(M.artists[aid].tickets, ticket)
 	}
-	rows.Close()
+}
+
+func loadVariations() {
+	rows, err := db.Query("SELECT id, name, ticket_id FROM variation")
+	must(err)
+	defer rows.Close()
+	for rows.Next() {
+		var id, tid int
+		var name string
+		rows.Scan(&id, &name, &tid)
+		v := &Variation{id, name, tid, []Stock{}}
+		M.variations[id] = v
+		M.tickets[tid].variations = append(M.tickets[tid].variations, v)
+	}
+}
+
+func loadStock() {
+	rows, err := db.Query("SELECT id, variation_id, seat_id FROM stock WHERE order_id IS NULL ORDER BY RAND()")
+	must(err)
+	defer rows.Close()
+	for rows.Next() {
+		var id, vid int
+		var seat string
+		rows.Scan(&id, &vid, &seat)
+		M.variations[vid].stock = append(
+			M.variations[vid].stock,
+			Stock{id, seat})
+	}
+}
+
+func loadOrder() {
+	maxid := 0
+	rows, err := db.Query("SELECT id FROM order_request ORDER BY id desc LIMIT 10")
+	must(err)
+
+	for rows.Next() {
+		var id int
+		rows.Scan(&id)
+		if maxid < id {
+			maxid = id
+		}
+		//todo: recent sold
+	}
+	M.nextOrderId = maxid + 1
+}
+
+func initMaster() {
+	loadArtists()
+	loadTickets()
+	loadVariations()
+	loadStock()
+	loadOrder()
 }
 
 func initSellService() {
@@ -188,74 +216,43 @@ func initSellService() {
 	defer sellMutex.Unlock()
 
 	initRecentSold()
-
-	rows, err := db.Query(`SELECT MAX(id) FROM order_request`)
-	if err != nil {
-		log.Panic(err)
-	}
-	rows.Next()
-	var max_id int
-	rows.Scan(&max_id)
-	rows.Close()
-	nextOrderId = max_id + 1
-
-	log.Println("nextOrderId", nextOrderId)
-
-	if rows, err = db.Query(`SELECT id, variation_id, seat_id FROM stock WHERE order_id IS NULL`); err != nil {
-		log.Panic(err)
-	}
-
-	// stock をメモリ上に確保しておく.
-	stock = make(map[int][]SeatStock)
-	for rows.Next() {
-		var id, variationId int
-		var seatId string
-		rows.Scan(&id, &variationId, &seatId)
-		stock[variationId] = append(stock[variationId], SeatStock{id: id, seat: seatId})
-	}
-	rows.Close()
-
-	for _, seats := range stock {
-		L := len(seats)
-		for i := 0; i < L; i++ {
-			r := rand.Int31n(int32(L))
-			seats[i], seats[r] = seats[r], seats[i]
-		}
-	}
+	log.Println("nextOrderId", M.nextOrderId)
 }
 
 func sell(memberId string, variationId int) (orderId int, seatId string) {
 	sellMutex.Lock()
 	defer sellMutex.Unlock()
 
-	if len(stock[variationId]) == 0 {
-		return 0, ""
-	}
+	orderId = M.nextOrderId
+	M.nextOrderId++
+	log.Println(orderId)
 
-	orderId = nextOrderId
-	nextOrderId++
-
-	var seat SeatStock
-	ss := stock[variationId]
-	seat, stock[variationId] = ss[len(ss)-1], ss[:len(ss)-1]
+	v := M.variations[variationId]
+	stock := v.stock[len(v.stock)-1]
+	v.stock = v.stock[:len(v.stock)-1]
+	seatId = stock.Seat
 
 	// 別 goroutineシーケンシャルにやる
 	db.Exec(`INSERT INTO order_request (id, member_id) VALUES (?, ?)`, orderId, memberId)
-	db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, seat.id)
-
-	seatId = seat.seat
-	vari := variations[variationId]
+	db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, stock.Id)
 
 	if len(recentSold) < 10 {
 		recentSold = append(recentSold, nil)
 	}
 	copy(recentSold[1:], recentSold)
+
+	ticket := M.tickets[v.TicketId]
+	artist := M.artists[ticket.ArtistId]
 	recentSold[0] = Data{
-		"ArtistName":    vari.artist,
-		"TicketName":    vari.ticket,
-		"VariationName": vari.variation,
-		"SeatId":        seatId}
+		"ArtistName":    artist.Name,
+		"TicketName":    ticket.Name,
+		"VariationName": v.Name,
+		"SeatId":        stock.Seat}
 	return
+}
+
+func parseTemplate(name string) *template.Template {
+	return template.Must(template.New(name).ParseFiles("templates/layout.html", "templates/"+name+".html"))
 }
 
 var (
@@ -267,15 +264,13 @@ var (
 	adminTmpl    = parseTemplate("admin")
 )
 
-var idRegexp = regexp.MustCompile(".+/([0-9]+)")
-
 func getId(path string) (int, error) {
-	id, err := strconv.ParseInt(idRegexp.FindStringSubmatch(path)[1], 10, 64)
+	pos := strings.LastIndex(path, "/") + 1
+	id, err := strconv.ParseInt(path[pos:], 10, 31)
+	if err != nil {
+		log.Println("Path doesn't finishes with id", path)
+	}
 	return int(id), err
-}
-
-func parseTemplate(name string) *template.Template {
-	return template.Must(template.New(name).ParseFiles("templates/layout.html", "templates/"+name+".html"))
 }
 
 type Data map[string]interface{}
@@ -323,6 +318,10 @@ func getRecentSold() []Data {
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) {
+		log.Println("top", time.Now().Sub(t))
+	}(time.Now())
+	artists := []*Artist{M.artists[1], M.artists[2]}
 	data := Data{
 		"Artists":    artists,
 		"RecentSold": getRecentSold(),
@@ -334,6 +333,7 @@ var artistPageCache = make(map[int]string)
 var artistPageExpire = make(map[int]int64)
 
 func artistHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) { log.Println("artist", time.Now().Sub(t)) }(time.Now())
 	artistId, err := getId(r.RequestURI)
 	if err != nil {
 		log.Panic(err)
@@ -345,46 +345,23 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var artist Data
-	for _, artist = range artists {
-		if artist["ArtistId"] == artistId {
-			break
-		}
-	}
-
-	var (
-		aid   int
-		aname string
-	)
-	aid = artistId
-	if aid == 1 {
-		aname = "NHN48"
-	} else {
-		aname = "はだいろクローバーZ"
-	}
+	artist := M.artists[artistId]
 
 	tt := []Data{}
-	for _, t := range tickets {
-		if t["artist_id"] != aid {
-			continue
-		}
-		tid, _ := t["id"].(int)
-		tname, _ := t["name"].(string)
+	for _, t := range artist.tickets {
 		ss := 0
-
-		for vid, v := range variations {
-			if v.ticket_id == tid {
-				ss += len(stock[vid])
-			}
+		for _, v := range t.variations {
+			ss += len(v.stock)
 		}
-		tt = append(tt, Data{"Id": tid, "Name": tname, "Count": ss})
+		tt = append(tt, Data{"Id": t.Id, "Name": t.Name, "Count": ss})
 	}
 
 	data := Data{
-		"Artist":     Data{"Id": aid, "Name": aname},
+		"Artist":     artist,
 		"Tickets":    tt,
 		"RecentSold": getRecentSold(),
 	}
+
 	buff := bytes.Buffer{}
 	artistTmpl.ExecuteTemplate(&buff, "layout", data)
 	s := buff.String()
@@ -393,28 +370,39 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 	artistPageExpire[artistId] = time.Now().UnixNano() + int64(time.Second)/2
 }
 
+type TicketPageCache struct {
+	cache map[int]string
+}
+
+func (self *TicketPageCache) Worker() {
+	for {
+		for _, t := range M.tickets {
+			self.cache[t.Id] = ticketPage(t.Id)
+		}
+		time.Sleep(time.Second / 2)
+	}
+}
+func (self *TicketPageCache) Get(t int) string {
+	cache := self.cache[t]
+	if cache != "" {
+		return cache
+	}
+	return ticketPage(t)
+}
+
 var ticketPageCache = TicketPageCache{cache: make(map[int]string)}
 
 func ticketPage(ticketId int) string {
-	var ticket Data
-	for _, v := range variations {
-		if v.ticket_id == ticketId {
-			ticket = Data{"Id": ticketId, "Name": v.ticket, "ArtistId": v.artist_id, "ArtistName": v.artist}
-			break
-		}
+	ticket := M.tickets[ticketId]
+	if ticket == nil {
+		return ""
 	}
 
 	vv := []Data{}
-	for i := 1; i <= 11; i++ {
-		v := variations[i]
-		if v.ticket_id != ticketId {
-			continue
-		}
-		vacancy := len(stock[v.variation_id])
-
+	for _, variation := range ticket.variations {
 		ss := make(map[string]bool)
-		for _, seat := range stock[v.variation_id] {
-			ss[seat.seat] = true
+		for _, seat := range variation.stock {
+			ss[seat.Seat] = true
 		}
 
 		sb := bytes.Buffer{}
@@ -425,7 +413,7 @@ func ticketPage(ticketId int) string {
 				sb.WriteString("<td id=\"")
 				sb.WriteString(seat)
 				sb.WriteString("\" class=\"")
-				if _, ok := ss[seat]; ok {
+				if ss[seat] {
 					sb.WriteString("available")
 				} else {
 					sb.WriteString("unavailable")
@@ -435,12 +423,20 @@ func ticketPage(ticketId int) string {
 			sb.WriteString("</tr>")
 		}
 		vv = append(vv, Data{
-			"Id": v.variation_id, "Name": v.variation,
-			"Seats": template.HTML(sb.String()), "Vacancy": vacancy})
+			"Id":      variation.Id,
+			"Name":    variation.Name,
+			"Seats":   template.HTML(sb.String()),
+			"Vacancy": len(variation.stock)})
 	}
 
+	//ticket = Data{"Id": ticketId, "Name": v.ticket, "ArtistId": v.artist_id, "ArtistName": v.artist}
+	tt := Data{
+		"Id":         ticket.Id,
+		"Name":       ticket.Name,
+		"ArtistId":   ticket.ArtistId,
+		"ArtistName": M.artists[ticket.ArtistId].Name}
 	data := Data{
-		"Ticket":     ticket,
+		"Ticket":     tt,
 		"Variations": vv,
 		"RecentSold": getRecentSold(),
 	}
@@ -451,6 +447,9 @@ func ticketPage(ticketId int) string {
 }
 
 func ticketHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) {
+		log.Println("ticket", time.Now().Sub(t))
+	}(time.Now())
 	ticketId, err := getId(r.RequestURI)
 	if err != nil {
 		log.Panic(err)
@@ -460,6 +459,10 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func buyHandler(w http.ResponseWriter, r *http.Request) {
+	defer func(t time.Time) {
+		log.Println("buy", time.Now().Sub(t))
+	}(time.Now())
+
 	if r.Method != "POST" {
 		return
 	}
@@ -491,7 +494,6 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-
 	adminTmpl.ExecuteTemplate(w, "layout", nil)
 }
 
@@ -532,6 +534,7 @@ func adminCsvHandler(w http.ResponseWriter, r *http.Request) {
 		log.Panic(err.Error())
 	}
 
+	w.Header().Set("Content-type", "text/csv")
 	wr := csv.NewWriter(w)
 	for _, order := range orders {
 		err := wr.Write([]string{
@@ -545,12 +548,12 @@ func adminCsvHandler(w http.ResponseWriter, r *http.Request) {
 			log.Panic(err.Error())
 		}
 	}
-
 	wr.Flush()
-	w.Header().Set("Content-type", "text/csv")
 }
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
 	config := loadConfig()
 	var err error
 	db, err = sql.Open("mysql", config.Db.String())
