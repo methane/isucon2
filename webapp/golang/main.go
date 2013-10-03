@@ -9,7 +9,7 @@ import (
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"html/template"
-        "io"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
@@ -88,8 +88,8 @@ type SeatStock struct {
 }
 
 type Variation struct {
-	artist, ticket, variation string
-        artist_id, ticket_id, variation_id int
+	artist, ticket, variation          string
+	artist_id, ticket_id, variation_id int
 }
 
 var (
@@ -99,12 +99,12 @@ var (
 	sellMutex   = &sync.RWMutex{}
 	recentSold  []Data
 	nextOrderId int
-	stock       map[int][]SeatStock // artist_id -> seat
+	stock       map[int][]SeatStock // variation_id -> seat
 
 	//master
 	variations map[int]Variation = make(map[int]Variation)
 	artists    []Data
-	tickets []Data
+	tickets    []Data
 )
 
 func initMaster() {
@@ -121,7 +121,7 @@ func initMaster() {
 
 		rows.Scan(&aid, &tid, &vid, &artist, &ticket, &variation)
 		variations[vid] = Variation{artist: artist, ticket: ticket, variation: variation,
-                    artist_id: aid, ticket_id:tid, variation_id: vid}
+			artist_id: aid, ticket_id: tid, variation_id: vid}
 	}
 	rows.Close()
 
@@ -139,7 +139,7 @@ func initMaster() {
 		}
 		artists = append(artists, Data{"Id": id, "Name": name})
 	}
-        rows.Close()
+	rows.Close()
 
 	rows, err = db.Query("SELECT id, name, artist_id FROM ticket")
 	if err != nil {
@@ -153,13 +153,13 @@ func initMaster() {
 		if err := rows.Scan(&id, &name, &aid); err != nil {
 			log.Panic(err)
 		}
-                tickets = append(tickets, Data{
-                    "id": id,
-                    "name": name,
-                    "artist_id": aid,
-                })
+		tickets = append(tickets, Data{
+			"id":        id,
+			"name":      name,
+			"artist_id": aid,
+		})
 	}
-        rows.Close()
+	rows.Close()
 }
 
 func initSellService() {
@@ -329,29 +329,29 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 		aname string
 	)
 	//err = db.QueryRow("SELECT id, name FROM artist WHERE id = ? LIMIT 1", artistId).Scan(&aid, &aname)
-        aid = artistId
-        if aid == 1 {
-            aname = "NHN48"
-        } else {
-            aname = "はだいろクローバーZ"
-        }
+	aid = artistId
+	if aid == 1 {
+		aname = "NHN48"
+	} else {
+		aname = "はだいろクローバーZ"
+	}
 
 	tt := []Data{}
-        for _, t := range tickets {
-            if t["artist_id"] != aid {
-                continue
-            }
-            tid, _ := t["id"].(int)
-            tname, _ := t["name"].(string)
-            ss := 0
+	for _, t := range tickets {
+		if t["artist_id"] != aid {
+			continue
+		}
+		tid, _ := t["id"].(int)
+		tname, _ := t["name"].(string)
+		ss := 0
 
-            for vid, v := range variations {
-                if v.ticket_id == tid {
-                    ss += len(stock[vid])
-                }
-            }
-            tt = append(tt, Data{"Id": tid, "Name": tname, "Count": ss})
-        }
+		for vid, v := range variations {
+			if v.ticket_id == tid {
+				ss += len(stock[vid])
+			}
+		}
+		tt = append(tt, Data{"Id": tid, "Name": tname, "Count": ss})
+	}
 
 	data := Data{
 		"Artist":     Data{"Id": aid, "Name": aname},
@@ -363,99 +363,97 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 
 var rowcol = make([]int, 64)
 
-
 var ticketPageCache map[int]string = make(map[int]string)
 
 func ticketPageMaker() {
-    for {
-        for i := 1; i<6; i++ {
-            sellMutex.Lock()
-            log.Println("Creating ticket page cache for", i)
-            ticketId := i
+	for {
+		for i := 1; i < 6; i++ {
+			sellMutex.Lock()
+			log.Println("Creating ticket page cache for", i)
+			ticketId := i
 
-            var (
-                    tid, aid     int
-                    tname, aname string
-            )
-            err := db.QueryRow("SELECT t.*, a.name AS artist_name FROM ticket t INNER JOIN artist a ON t.artist_id = a.id WHERE t.id = ? LIMIT 1", ticketId).Scan(&tid, &tname, &aid, &aname)
-            if err != nil {
-                    sellMutex.Unlock()
-                    time.Sleep(time.Second)
-                    continue;
-            }
+			var (
+				tid, aid     int
+				tname, aname string
+			)
+			err := db.QueryRow("SELECT t.*, a.name AS artist_name FROM ticket t INNER JOIN artist a ON t.artist_id = a.id WHERE t.id = ? LIMIT 1", ticketId).Scan(&tid, &tname, &aid, &aname)
+			if err != nil {
+				sellMutex.Unlock()
+				time.Sleep(time.Second)
+				continue
+			}
 
-            ticket := Data{"Id": tid, "Name": tname, "ArtistId": aid, "ArtistName": aname}
+			ticket := Data{"Id": tid, "Name": tname, "ArtistId": aid, "ArtistName": aname}
 
-            var rows *sql.Rows
-            rows, err = db.Query("SELECT id, name FROM variation WHERE ticket_id = ?", tid)
-            if err != nil {
-                    sellMutex.Unlock()
-                    time.Sleep(time.Second)
-                    continue;
-            }
+			var rows *sql.Rows
+			rows, err = db.Query("SELECT id, name FROM variation WHERE ticket_id = ?", tid)
+			if err != nil {
+				sellMutex.Unlock()
+				time.Sleep(time.Second)
+				continue
+			}
 
-            variations := []Data{}
-            for rows.Next() {
-                    var id int
-                    var name string
-                    if err := rows.Scan(&id, &name); err != nil {
-                        sellMutex.Unlock()
-                        time.Sleep(time.Second)
-                        continue;
-                    }
+			variations := []Data{}
+			for rows.Next() {
+				var id int
+				var name string
+				if err := rows.Scan(&id, &name); err != nil {
+					sellMutex.Unlock()
+					time.Sleep(time.Second)
+					continue
+				}
 
-                    var rows2 *sql.Rows
-                    rows2, err = db.Query("SELECT seat_id, order_id FROM stock WHERE variation_id = ?", id)
-                    if err != nil {
-                            sellMutex.Unlock()
-                            time.Sleep(time.Second)
-                            continue;
-                    }
-                    stock := make(Data)
-                    for rows2.Next() {
-                            var (
-                                    seatId  string
-                                    orderId interface{}
-                            )
-                            err = rows2.Scan(&seatId, &orderId)
-                            if err != nil {
-                                    log.Panic(err)
-                            }
+				var rows2 *sql.Rows
+				rows2, err = db.Query("SELECT seat_id, order_id FROM stock WHERE variation_id = ?", id)
+				if err != nil {
+					sellMutex.Unlock()
+					time.Sleep(time.Second)
+					continue
+				}
+				stock := make(Data)
+				for rows2.Next() {
+					var (
+						seatId  string
+						orderId interface{}
+					)
+					err = rows2.Scan(&seatId, &orderId)
+					if err != nil {
+						log.Panic(err)
+					}
 
-                            stock[seatId] = orderId
-                    }
-                    if err := rows2.Err(); err != nil {
-                            log.Panic(err)
-                    }
+					stock[seatId] = orderId
+				}
+				if err := rows2.Err(); err != nil {
+					log.Panic(err)
+				}
 
-                    var vacancy int
-                    err = db.QueryRow(`SELECT COUNT(*) AS cunt FROM stock WHERE variation_id = ? AND order_id IS NULL`, id).Scan(&vacancy)
-                    if err != nil {
-                            log.Panic(err)
-                    }
-                    variations = append(variations, Data{"Id": id, "Name": name, "Stock": stock, "Vacancy": vacancy})
-            }
-            if err := rows.Err(); err != nil {
-                    log.Panic(err)
-            }
+				var vacancy int
+				err = db.QueryRow(`SELECT COUNT(*) AS cunt FROM stock WHERE variation_id = ? AND order_id IS NULL`, id).Scan(&vacancy)
+				if err != nil {
+					log.Panic(err)
+				}
+				variations = append(variations, Data{"Id": id, "Name": name, "Stock": stock, "Vacancy": vacancy})
+			}
+			if err := rows.Err(); err != nil {
+				log.Panic(err)
+			}
 
-            data := Data{
-                    "Ticket":     ticket,
-                    "Variations": variations,
-                    "RecentSold": getRecentSold(),
-                    "RowCol":     rowcol,
-            }
+			data := Data{
+				"Ticket":     ticket,
+				"Variations": variations,
+				"RecentSold": getRecentSold(),
+				"RowCol":     rowcol,
+			}
 
-            buf := bytes.Buffer{}
-            ticketTmpl.ExecuteTemplate(&buf, "layout", data)
-            ticketPageCache[ticketId] = buf.String()
+			buf := bytes.Buffer{}
+			ticketTmpl.ExecuteTemplate(&buf, "layout", data)
+			ticketPageCache[ticketId] = buf.String()
 
-            sellMutex.Unlock()
-        }
-        time.Sleep(time.Second / 10)
-    }
+			sellMutex.Unlock()
+		}
+		time.Sleep(time.Second / 10)
+	}
 }
-
 
 func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	ticketId, err := getId(r.RequestURI)
@@ -469,75 +467,66 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		tid, aid     int
-		tname, aname string
-	)
-	err = db.QueryRow("SELECT t.*, a.name AS artist_name FROM ticket t INNER JOIN artist a ON t.artist_id = a.id WHERE t.id = ? LIMIT 1", ticketId).Scan(&tid, &tname, &aid, &aname)
-	if err != nil {
-		log.Panic(err)
+	var ticket Data
+	for _, v := range variations {
+		if v.ticket_id == ticketId {
+			ticket = Data{"Id": ticketId, "Name": v.ticket, "ArtistId": v.artist_id, "ArtistName": v.artist}
+			break
+		}
 	}
 
-	ticket := Data{"Id": tid, "Name": tname, "ArtistId": aid, "ArtistName": aname}
-
-	var rows *sql.Rows
-	rows, err = db.Query("SELECT id, name FROM variation WHERE ticket_id = ?", tid)
-	if err != nil {
-		log.Panic(err)
-	}
-
-	variations := []Data{}
-	for rows.Next() {
-		var id int
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			log.Panic(err)
+	vv := []Data{}
+	for _, v := range variations {
+		if v.ticket_id != ticketId {
+			continue
 		}
+		vacancy := len(stock[v.variation_id])
+		ss := Data{}
 
-		var rows2 *sql.Rows
-		rows2, err = db.Query("SELECT seat_id, order_id FROM stock WHERE variation_id = ?", id)
-		if err != nil {
-			log.Panic(err)
-		}
-		stock := make(Data)
-		for rows2.Next() {
-			var (
-				seatId  string
-				orderId interface{}
-			)
-			err = rows2.Scan(&seatId, &orderId)
-			if err != nil {
-				log.Panic(err)
+		for i := 0; i < 64; i++ {
+			for j := 0; j < 64; j++ {
+				seat := fmt.Sprintf("%02d-%02d", i, j)
+				ss[seat] = true
 			}
-
-			stock[seatId] = orderId
-		}
-		if err := rows2.Err(); err != nil {
-			log.Panic(err)
 		}
 
-		var vacancy int
-		err = db.QueryRow(`
-        SELECT COUNT(*) AS cunt FROM stock WHERE variation_id = ? AND
-         order_id IS NULL`, id).Scan(&vacancy)
-		if err != nil {
-			log.Panic(err)
+		for _, seat := range stock[v.variation_id] {
+			delete(ss, seat.seat)
 		}
 
-		variations = append(variations, Data{"Id": id, "Name": name, "Stock": stock, "Vacancy": vacancy})
-	}
-	if err := rows.Err(); err != nil {
-		log.Panic(err)
+		sb := bytes.Buffer{}
+		for i := 0; i < 64; i++ {
+			sb.WriteString("<tr>")
+			for j := 0; j < 64; j++ {
+				seat := fmt.Sprintf("%02d-%02d", i, j)
+				sb.WriteString("<td id=\"")
+				sb.WriteString(seat)
+				sb.WriteString("\" class=\"")
+				if _, ok := ss[seat]; ok {
+					sb.WriteString("unavailable")
+				} else {
+					sb.WriteString("available")
+				}
+				sb.WriteString("\"></td>\n")
+			}
+			sb.WriteString("</tr>")
+		}
+
+		vv = append(vv, Data{"Id": v.variation_id, "Name": v.variation,
+			"Stock": ss, "Seats": template.HTML(sb.String()), "Vacancy": vacancy})
 	}
 
 	data := Data{
 		"Ticket":     ticket,
-		"Variations": variations,
+		"Variations": vv,
 		"RecentSold": getRecentSold(),
 		"RowCol":     rowcol,
 	}
 
-	ticketTmpl.ExecuteTemplate(w, "layout", data)
+	//ticketTmpl.ExecuteTemplate(w, "layout", data)
+	buf := bytes.Buffer{}
+	ticketTmpl.ExecuteTemplate(&buf, "layout", data)
+	buf.WriteTo(w)
 }
 
 func buyHandler(w http.ResponseWriter, r *http.Request) {
@@ -641,12 +630,13 @@ func main() {
 	db.SetMaxIdleConns(256)
 
 	for i, _ := range rowcol {
-		rowcol[i] = i + 1
+		//rowcol[i] = i + 1
+		rowcol[i] = i
 	}
 
 	initMaster()
 	initSellService()
-        //go ticketPageMaker()
+	//go ticketPageMaker()
 
 	http.HandleFunc("/", topPageHandler)
 	http.HandleFunc("/artist/", artistHandler)
