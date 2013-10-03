@@ -13,12 +13,12 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"regexp"
 	"strconv"
 	"sync"
 	"time"
-	_ "net/http/pprof"
 )
 
 type Config struct {
@@ -33,6 +33,16 @@ type DbConfig struct {
 	DbName   string `json:"dbname"`
 }
 
+func (db *DbConfig) String() string {
+	return fmt.Sprintf(
+		"%s:%s@tcp(%s:%d)/%s",
+		db.UserName,
+		db.Password,
+		db.Host,
+		db.Port,
+		db.DbName,
+	)
+}
 
 type TicketPageCache struct {
 	cache map[int]string
@@ -55,17 +65,6 @@ func (self *TicketPageCache) Get(t int) string {
 	return ticketPage(t)
 }
 
-func (db *DbConfig) String() string {
-	return fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s",
-		db.UserName,
-		db.Password,
-		db.Host,
-		db.Port,
-		db.DbName,
-	)
-}
-
 func loadConfig() *Config {
 	var c Config
 	log.Println("Loading configuration")
@@ -79,7 +78,7 @@ func loadConfig() *Config {
 		defer f.Close()
 		json.NewDecoder(f).Decode(&c)
 	} else {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	return &c
@@ -89,7 +88,7 @@ func initDb() {
 	log.Println("Initializing database")
 	f, err := os.Open("../config/database/initial_data.sql")
 	if err != nil {
-		log.Panic(err.Error())
+		log.Fatal(err)
 	}
 	s := bufio.NewScanner(f)
 	for s.Scan() {
@@ -116,8 +115,7 @@ type Variation struct {
 }
 
 var (
-	config = loadConfig()
-	db     *sql.DB
+	db *sql.DB
 
 	sellMutex   = &sync.RWMutex{}
 	recentSold  []Data
@@ -324,14 +322,13 @@ func getRecentSold() []Data {
 	return recentSold
 }
 
-func topPageHandler(w http.ResponseWriter, r *http.Request) {
+func topHandler(w http.ResponseWriter, r *http.Request) {
 	data := Data{
 		"Artists":    artists,
 		"RecentSold": getRecentSold(),
 	}
 	indexTmpl.ExecuteTemplate(w, "layout", data)
 }
-
 
 var artistPageCache = make(map[int]string)
 var artistPageExpire = make(map[int]int64)
@@ -393,7 +390,7 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 	s := buff.String()
 	io.WriteString(w, s)
 	artistPageCache[artistId] = s
-	artistPageExpire[artistId] = time.Now().UnixNano() + int64(time.Second) / 2
+	artistPageExpire[artistId] = time.Now().UnixNano() + int64(time.Second)/2
 }
 
 var ticketPageCache = TicketPageCache{cache: make(map[int]string)}
@@ -554,19 +551,20 @@ func adminCsvHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-
+	config := loadConfig()
 	var err error
 	db, err = sql.Open("mysql", config.Db.String())
 	if err != nil {
-		log.Panic(err.Error())
+		log.Panic(err)
 	}
 	db.SetMaxIdleConns(256)
 
+	initDb()
 	initMaster()
 	initSellService()
 	go ticketPageCache.Worker()
 
-	http.HandleFunc("/", topPageHandler)
+	http.HandleFunc("/", topHandler)
 	http.HandleFunc("/artist/", artistHandler)
 	http.HandleFunc("/ticket/", ticketHandler)
 	http.HandleFunc("/buy", buyHandler)
@@ -577,5 +575,6 @@ func main() {
 	http.Handle("/images/", http.FileServer(http.Dir("static")))
 	http.Handle("/js/", http.FileServer(http.Dir("static")))
 	http.Handle("/favicon.ico", http.FileServer(http.Dir("static")))
+
 	log.Fatal(http.ListenAndServe(":5000", nil))
 }
