@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	_ "net/http/pprof"
 )
 
 type Config struct {
@@ -32,6 +33,7 @@ type DbConfig struct {
 	DbName   string `json:"dbname"`
 }
 
+
 type TicketPageCache struct {
 	cache map[int]string
 }
@@ -41,7 +43,7 @@ func (self *TicketPageCache) Worker() {
 		for p := 1; p < 11; p++ {
 			self.cache[p] = ticketPage(p)
 		}
-		time.Sleep(time.Second / 4)
+		time.Sleep(time.Second / 2)
 	}
 }
 
@@ -330,10 +332,20 @@ func topPageHandler(w http.ResponseWriter, r *http.Request) {
 	indexTmpl.ExecuteTemplate(w, "layout", data)
 }
 
+
+var artistPageCache = make(map[int]string)
+var artistPageExpire = make(map[int]int64)
+
 func artistHandler(w http.ResponseWriter, r *http.Request) {
 	artistId, err := getId(r.RequestURI)
 	if err != nil {
 		log.Panic(err)
+	}
+
+	expire, ok := artistPageExpire[artistId]
+	if ok && expire > time.Now().UnixNano() {
+		io.WriteString(w, artistPageCache[artistId])
+		return
 	}
 
 	var artist Data
@@ -347,7 +359,6 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 		aid   int
 		aname string
 	)
-	//err = db.QueryRow("SELECT id, name FROM artist WHERE id = ? LIMIT 1", artistId).Scan(&aid, &aname)
 	aid = artistId
 	if aid == 1 {
 		aname = "NHN48"
@@ -377,7 +388,12 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 		"Tickets":    tt,
 		"RecentSold": getRecentSold(),
 	}
-	artistTmpl.ExecuteTemplate(w, "layout", data)
+	buff := bytes.Buffer{}
+	artistTmpl.ExecuteTemplate(&buff, "layout", data)
+	s := buff.String()
+	io.WriteString(w, s)
+	artistPageCache[artistId] = s
+	artistPageExpire[artistId] = time.Now().UnixNano() + int64(time.Second) / 2
 }
 
 var ticketPageCache = TicketPageCache{cache: make(map[int]string)}
@@ -442,7 +458,6 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Panic(err)
 	}
-	time.Sleep(time.Second / 10) // XXX
 	page := ticketPageCache.Get(ticketId)
 	io.WriteString(w, page)
 }
