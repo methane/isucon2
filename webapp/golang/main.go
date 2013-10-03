@@ -86,6 +86,7 @@ func initDb() {
 
 var (
 	db *sql.DB
+	queryChan = make(chan string, 128)
 
 	sellMutex  = &sync.RWMutex{}
 	recentSold []Data
@@ -225,16 +226,20 @@ func sell(memberId string, variationId int) (orderId int, seatId string) {
 
 	orderId = M.nextOrderId
 	M.nextOrderId++
-	log.Println(orderId)
 
 	v := M.variations[variationId]
+	if len(v.stock) == 0 {
+		return 0, ""
+	}
 	stock := v.stock[len(v.stock)-1]
 	v.stock = v.stock[:len(v.stock)-1]
 	seatId = stock.Seat
 
 	// 別 goroutineシーケンシャルにやる
-	db.Exec(`INSERT INTO order_request (id, member_id) VALUES (?, ?)`, orderId, memberId)
-	db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, stock.Id)
+	//db.Exec(`INSERT INTO order_request (id, member_id) VALUES (?, ?)`, orderId, memberId)
+	//db.Exec(`UPDATE stock SET order_id=? WHERE id=?`, orderId, stock.Id)
+	queryChan <- fmt.Sprintf("INSERT INTO order_request (id, member_id) VALUES (%d, '%s')", orderId, memberId)
+	queryChan <- fmt.Sprintf("UPDATE stock SET order_id=%d WHERE id=%d", orderId, stock.Id)
 
 	if len(recentSold) < 10 {
 		recentSold = append(recentSold, nil)
@@ -318,9 +323,7 @@ func getRecentSold() []Data {
 }
 
 func topHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) {
-		log.Println("top", time.Now().Sub(t))
-	}(time.Now())
+	//defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
 	artists := []*Artist{M.artists[1], M.artists[2]}
 	data := Data{
 		"Artists":    artists,
@@ -333,7 +336,7 @@ var artistPageCache = make(map[int]string)
 var artistPageExpire = make(map[int]int64)
 
 func artistHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) { log.Println("artist", time.Now().Sub(t)) }(time.Now())
+	//defer func(t time.Time) { log.Println("artist", time.Now().Sub(t)) }(time.Now())
 	artistId, err := getId(r.RequestURI)
 	if err != nil {
 		log.Panic(err)
@@ -447,9 +450,7 @@ func ticketPage(ticketId int) string {
 }
 
 func ticketHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) {
-		log.Println("ticket", time.Now().Sub(t))
-	}(time.Now())
+	//defer func(t time.Time) { log.Println("ticket", time.Now().Sub(t)) }(time.Now())
 	ticketId, err := getId(r.RequestURI)
 	if err != nil {
 		log.Panic(err)
@@ -459,10 +460,7 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func buyHandler(w http.ResponseWriter, r *http.Request) {
-	defer func(t time.Time) {
-		log.Println("buy", time.Now().Sub(t))
-	}(time.Now())
-
+	//defer func(t time.Time) { log.Println("buy", time.Now().Sub(t)) }(time.Now())
 	if r.Method != "POST" {
 		return
 	}
@@ -498,6 +496,9 @@ func adminHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func adminCsvHandler(w http.ResponseWriter, r *http.Request) {
+	sellMutex.Lock()
+	defer sellMutex.Unlock()
+	time.Sleep(1)
 	rows, err := db.Query(`
         SELECT order_request.*, stock.seat_id, stock.variation_id, stock.updated_at                                                        
         FROM order_request JOIN stock ON order_request.id = stock.order_id
@@ -545,10 +546,16 @@ func adminCsvHandler(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%s", fmt.Sprintf("%s", order["Stock.UpdatedAt"])),
 		})
 		if err != nil {
-			log.Panic(err.Error())
+			log.Panic(err)
 		}
 	}
 	wr.Flush()
+}
+
+func bgdb() {
+	for q := range queryChan {
+		db.Exec(q)
+	}
 }
 
 func main() {
@@ -565,6 +572,7 @@ func main() {
 	initDb()
 	initMaster()
 	initSellService()
+	go bgdb()
 	go ticketPageCache.Worker()
 
 	http.HandleFunc("/", topHandler)
