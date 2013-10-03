@@ -21,14 +21,7 @@
 {{$stock := .Stock}}
 <h4>{{ .Name }}</h4>
 <table class="seats" data-variationid="{{ .Id }}">
-    {{range $row := $rowcol}}
-  <tr>
-      {{range $col := $rowcol}}
-      {{$key := printf "%02d-%02d" $row $col}}
-      <td id="{{ $key }}" class="{{ if index $stock $key }}unavailable{{ else }}available{{ end }}"></td>
-      {{end}}
-  </tr>
-  {{end}}
+{{ .Seats }}
 </table>
 {{end}}
 
