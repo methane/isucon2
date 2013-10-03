@@ -380,7 +380,7 @@ func artistHandler(w http.ResponseWriter, r *http.Request) {
 	artistTmpl.ExecuteTemplate(w, "layout", data)
 }
 
-var ticketPageCache = TicketPageCache{ cache: make(map[int]string)}
+var ticketPageCache = TicketPageCache{cache: make(map[int]string)}
 
 func ticketPage(ticketId int) string {
 	var ticket Data
@@ -442,7 +442,7 @@ func ticketHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Panic(err)
 	}
-	time.Sleep(time.Second / 10)  // XXX
+	time.Sleep(time.Second / 10) // XXX
 	page := ticketPageCache.Get(ticketId)
 	io.WriteString(w, page)
 }
