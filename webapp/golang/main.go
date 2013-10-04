@@ -85,7 +85,7 @@ func initDb() {
 }
 
 var (
-	db *sql.DB
+	db        *sql.DB
 	queryChan = make(chan string, 128)
 
 	sellMutex  = &sync.RWMutex{}
@@ -322,14 +322,32 @@ func getRecentSold() []Data {
 	return recentSold
 }
 
+var pageCahceLock = sync.RWMutex{}
+var pageCache = make(map[string]string)
+var pageExpire = make(map[string]int64)
+
 func topHandler(w http.ResponseWriter, r *http.Request) {
 	//defer func(t time.Time) { log.Println("top", time.Now().Sub(t)) }(time.Now())
+	pageCahceLock.Lock()
+	defer pageCahceLock.Unlock()
+
+	expire, ok := pageExpire["/"]
+	if ok && expire > time.Now().UnixNano() {
+		io.WriteString(w, pageCache["/"])
+		return
+	}
 	artists := []*Artist{M.artists[1], M.artists[2]}
 	data := Data{
 		"Artists":    artists,
 		"RecentSold": getRecentSold(),
 	}
-	indexTmpl.ExecuteTemplate(w, "layout", data)
+	buf := bytes.Buffer{}
+	indexTmpl.ExecuteTemplate(&buf, "layout", data)
+	s := buf.String()
+
+	io.WriteString(w, s)
+	pageCache["/"] = s
+	pageExpire["/"] = time.Now().UnixNano() + int64(time.Second)/2
 }
 
 var artistPageCache = make(map[int]string)
