@@ -14,6 +14,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -576,6 +577,39 @@ func bgdb() {
 	}
 }
 
+func initStaticFiles(prefix string) {
+	wf := func(path string, info os.FileInfo, err error) error {
+		log.Println(path, info, err)
+		if path == prefix {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		urlpath := path[len(prefix):]
+		if urlpath[0] != '/' {
+			urlpath = "/" + urlpath
+		}
+		log.Println("Registering", urlpath, path)
+		f, err := os.Open(path)
+		if err != nil {
+			log.Println(err)
+			return nil
+		}
+		content := make([]byte, info.Size())
+		f.Read(content)
+		f.Close()
+
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(time.Second)
+			w.Write(content)
+		}
+		http.HandleFunc(urlpath, handler)
+		return nil
+	}
+	filepath.Walk(prefix, wf)
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -590,8 +624,6 @@ func main() {
 	initDb()
 	initMaster()
 	initSellService()
-	go bgdb()
-	go ticketPageCache.Worker()
 
 	http.HandleFunc("/", topHandler)
 	http.HandleFunc("/artist/", artistHandler)
@@ -600,10 +632,14 @@ func main() {
 	http.HandleFunc("/admin", adminHandler)
 	http.HandleFunc("/admin/order.csv", adminCsvHandler)
 
-	http.Handle("/css/", http.FileServer(http.Dir("static")))
-	http.Handle("/images/", http.FileServer(http.Dir("static")))
-	http.Handle("/js/", http.FileServer(http.Dir("static")))
-	http.Handle("/favicon.ico", http.FileServer(http.Dir("static")))
+	initStaticFiles("static")
+	//http.Handle("/css/", http.FileServer(http.Dir("static")))
+	//http.Handle("/images/", http.FileServer(http.Dir("static")))
+	//http.Handle("/js/", http.FileServer(http.Dir("static")))
+	//http.Handle("/favicon.ico", http.FileServer(http.Dir("static")))
+
+	go bgdb()
+	go ticketPageCache.Worker()
 
 	log.Fatal(http.ListenAndServe(":5000", nil))
 }
